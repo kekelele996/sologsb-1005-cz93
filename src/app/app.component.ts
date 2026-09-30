@@ -10,8 +10,13 @@ import { BadgeModule } from 'primeng/badge'
 import { DialogModule } from 'primeng/dialog'
 import { TooltipModule } from 'primeng/tooltip'
 import { Subscription } from 'rxjs'
-import type { Annotation, Claim, Feature, Role, ValidationIssue, WorkbenchState } from './models'
+import type { Annotation, CaseSummary, Claim, Feature, PendingSupport, Role, ValidationIssue, WorkbenchState } from './models'
 import { WorkbenchService } from './workbench.service'
+
+interface SplitMessage {
+  severity: 'success' | 'warning' | 'error'
+  text: string
+}
 
 @Component({
   selector: 'app-root',
@@ -22,6 +27,7 @@ import { WorkbenchService } from './workbench.service'
 })
 export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
   state: WorkbenchState
+  cases: CaseSummary[] = []
   issues: ValidationIssue[] = []
   history = { past: 0, future: 0 }
   compareA = ''
@@ -29,6 +35,11 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
   annotationDraft = ''
   versionDialog = false
   versionName = ''
+  splitDialog = false
+  splitName = ''
+  splitClaimIds: string[] = []
+  simulateHandoffFailure = false
+  splitMessage: SplitMessage | null = null
   activeIssue: ValidationIssue | null = null
   roleOptions: Array<{ label: string; value: Role }> = [
     { label: '代理人（可编辑主数据与本人批注）', value: 'author' },
@@ -39,6 +50,7 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
 
   constructor(readonly service: WorkbenchService) {
     this.state = service.snapshot
+    this.cases = []
   }
 
   ngOnInit(): void {
@@ -46,6 +58,7 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
       this.state = structuredClone(state)
       this.syncVersions()
     }))
+    this.subscriptions.add(this.service.cases$.subscribe(cases => this.cases = cases))
     this.subscriptions.add(this.service.issues$.subscribe(issues => this.issues = issues))
     this.subscriptions.add(this.service.history$.subscribe(history => this.history = history))
     window.addEventListener('keydown', this.handleKeyboard)
@@ -70,6 +83,16 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
   get warningCount(): number { return this.issues.filter(item => item.severity === 'warning').length }
   get canEditMainData(): boolean { return this.state.role !== 'viewer' }
   get mappedFeatureCount(): number { return this.claimFeatures.filter(feature => feature.supportIds.length > 0).length }
+  get isParent(): boolean { return this.state.caseKind === 'parent' }
+  get isDivisional(): boolean { return this.state.caseKind === 'divisional' }
+  get caseOptions(): Array<{ label: string; value: string }> {
+    return this.cases.map(record => ({ label: `${record.kind === 'parent' ? '母案' : '分案'} · ${record.name}`, value: record.id }))
+  }
+  get handoffFailed(): boolean { return this.state.handoffStatus === 'failed' }
+  get pendingSupports(): PendingSupport[] { return this.state.pendingSupports }
+  get unresolvedSupportCount(): number { return this.pendingSupports.filter(item => item.status === 'pending').length }
+  get confirmedSupportCount(): number { return this.pendingSupports.filter(item => item.status === 'confirmed').length }
+  get rejectedSupportCount(): number { return this.pendingSupports.filter(item => item.status === 'rejected').length }
 
   claimLabel(id: string): string { return this.state.claims.find(item => item.id === id)?.title || '未命名权利要求' }
   featureLabel(id: string): string { return this.state.features.find(item => item.id === id)?.label || id }
@@ -77,6 +100,16 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
   isMapped(feature: Feature, paragraphId: string): boolean { return feature.supportIds.includes(paragraphId) }
   isOwnAnnotation(annotation: Annotation): boolean { return annotation.authorRole === this.state.role }
   ownerLabel(role: Role): string { return ({ author: '代理人', examiner: '审查员', viewer: '观察者' })[role] }
+  caseKindLabel(record: CaseSummary): string { return record.kind === 'parent' ? '母案' : '分案' }
+  caseName(recordId: string): string { return this.cases.find(record => record.id === recordId)?.name || recordId }
+  pendingFeature(pending: PendingSupport): Feature | undefined { return this.state.features.find(feature => feature.id === pending.featureId) }
+  pendingCount(feature: Feature): number { return this.pendingSupports.filter(item => item.featureId === feature.id && item.status === 'pending').length }
+  pendingTarget(pending: PendingSupport) { return this.state.paragraphs.find(paragraph => paragraph.id === (pending.targetParagraphId || '')) }
+  targetOptions(pending: PendingSupport) {
+    const normalized = pending.sourceText.replace(/\s+/g, '').trim()
+    return this.state.paragraphs.filter(paragraph => paragraph.text.replace(/\s+/g, '').trim() === normalized)
+  }
+  splitClaimTitle(id: string): string { return this.state.splitPackage?.claims.find(claim => claim.id === id)?.title || id }
 
   updateClaimField(field: 'title' | 'text' | 'number' | 'independent', event: Event): void {
     const element = event.target as HTMLInputElement
@@ -122,6 +155,49 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
     this.service.restoreVersion(id)
   }
 
+  openSplitDialog(): void {
+    this.splitName = `分案 ${new Date().toLocaleDateString('zh-CN')}`
+    this.splitClaimIds = this.state.selectedClaimId ? [this.state.selectedClaimId] : this.state.claims.slice(0, 1).map(claim => claim.id)
+    this.simulateHandoffFailure = false
+    this.splitMessage = null
+    this.splitDialog = true
+  }
+
+  toggleSplitClaim(id: string, checked: boolean): void {
+    this.splitClaimIds = checked
+      ? Array.from(new Set([...this.splitClaimIds, id]))
+      : this.splitClaimIds.filter(item => item !== id)
+  }
+
+  submitSplit(): void {
+    const result = this.service.createDivisionalSplit(this.splitName, this.splitClaimIds, this.simulateHandoffFailure)
+    this.splitMessage = { severity: result.ok ? 'success' : 'warning', text: result.message }
+    this.splitDialog = false
+  }
+
+  retryHandoff(): void {
+    const result = this.service.retryHandoff()
+    this.splitMessage = { severity: result.ok ? 'success' : 'error', text: result.message }
+  }
+
+  setPendingTarget(pending: PendingSupport, event: Event): void {
+    const targetId = (event.target as HTMLSelectElement).value || null
+    this.service.setPendingTarget(pending.id, targetId)
+  }
+
+  confirmPending(pending: PendingSupport): void {
+    const target = this.state.paragraphs.find(paragraph => paragraph.id === pending.targetParagraphId)
+    if (!target || target.text.replace(/\s+/g, '').trim() !== pending.sourceText.replace(/\s+/g, '').trim()) {
+      this.splitMessage = { severity: 'error', text: '只能确认正文完全一致的分案段落；编号不一致不会自动继承映射。' }
+      return
+    }
+    this.splitMessage = null
+    this.service.confirmPendingSupport(pending.id, target.id)
+  }
+
+  rejectPending(id: string): void { this.service.rejectPendingSupport(id) }
+  reopenPending(id: string): void { this.service.reopenPendingSupport(id) }
+
   getVersion(id: string) { return this.state.versions.find(item => item.id === id) }
   compareRows(): Array<{ label: string; before: string; after: string; changed: boolean }> {
     const a = this.getVersion(this.compareA)
@@ -141,7 +217,7 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
     const url = URL.createObjectURL(new Blob([content], { type: mime }))
     const anchor = document.createElement('a')
     anchor.href = url
-    anchor.download = `patent-claim-check-${new Date().toISOString().slice(0, 10)}.${type}`
+    anchor.download = `${this.state.caseKind}-claim-check-${new Date().toISOString().slice(0, 10)}.${type}`
     anchor.click()
     URL.revokeObjectURL(url)
   }
@@ -149,7 +225,7 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
   locateIssue(issue: ValidationIssue): void {
     this.activeIssue = issue
     if (issue.featureId) this.service.selectFeature(issue.featureId)
-    this.service.setTab('mapping')
+    this.service.setTab(issue.type === 'pending-support' ? 'reconciliation' : 'mapping')
   }
 
   closeIssue(): void { this.activeIssue = null }
