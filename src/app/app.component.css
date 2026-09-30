@@ -26,3 +26,65 @@
 .dialog-body { display:grid; gap:14px; }.dialog-body p { margin:0; color:var(--muted); font-size:12px; line-height:1.6; }
 @media (max-width:1260px) { .workbench { grid-template-columns:250px minmax(0,1fr); }.inspector { grid-column:1 / -1; position:static; max-height:none; display:grid; grid-template-columns:repeat(3,1fr); }.mapping-grid { grid-template-columns:220px 1fr; }.support-panel { grid-column:1 / -1; min-height:auto; } }
 @media (max-width:850px) { .topbar { height:auto; padding:14px; align-items:flex-start; }.top-actions { flex-wrap:wrap; justify-content:flex-end; }.save-state { display:none; }.workbench { grid-template-columns:1fr; padding:10px; }.case-sidebar,.inspector { position:static; max-height:none; }.case-sidebar { display:grid; grid-template-columns:repeat(2,1fr); }.issue-panel,.export-panel { grid-column:span 1; }.mapping-grid { grid-template-columns:1fr; }.feature-list-panel,.feature-editor,.support-panel { min-height:auto; }.mapping-summary { grid-template-columns:repeat(2,1fr); }.page-heading { align-items:flex-start; }.tabs { overflow:auto; }.tabs button { min-width:150px; }.form-row,.title-fields,.compare-selects,.diff-cols { grid-template-columns:1fr; }.inspector { grid-template-columns:1fr; }.new-annotation { grid-template-columns:1fr; } }
+
+/* ── 案件切换 ─────────────────────────────── */
+.case-switch { display:flex; align-items:center; gap:10px; }
+.case-chip { display:inline-flex; align-items:center; gap:9px; padding:7px 13px; border:1px solid rgba(255,255,255,.22); border-radius:12px; background:rgba(255,255,255,.08); color:#eaf3ee; text-align:left; cursor:pointer; }
+.case-chip.parent { cursor:default; }
+button.case-chip { cursor:pointer; }
+.case-chip i { font-size:15px; color:#9ed7ba; }
+.case-chip span { display:block; }
+.case-chip small { display:block; margin-top:1px; color:#a9bdb3; font-size:9px; letter-spacing:.08em; }
+.case-arrow { color:#7f968b; font-size:13px; }
+.case-switch .p-button { white-space:nowrap; }
+
+.divisional-banner { display:flex; align-items:center; gap:13px; margin:0 auto; max-width:1840px; padding:10px 22px; border-bottom:1px solid #d8e0db; background:#f3f8f5; }
+.divisional-banner > i { color:#176b4d; font-size:18px; }
+.banner-text { display:grid; gap:2px; margin-right:auto; }
+.banner-text strong { font-size:12px; }
+.banner-text small { color:var(--muted); font-size:10px; }
+
+.tab-badge { display:inline-grid; place-items:center; min-width:17px; height:17px; margin-left:5px; padding:0 5px; border-radius:999px; background:#b42318; color:white; font-size:10px; font-weight:800; }
+
+/* ── 分案对账 ─────────────────────────────── */
+.reconcile-panel { max-width:1060px; margin:0 auto; }
+.handoff-card { display:flex; align-items:center; gap:13px; margin:14px 0; padding:14px 16px; border:1px solid #cfe0d7; border-radius:13px; background:#f5faf7; }
+.handoff-card.failed { border-color:#ecc3bd; background:#fdf4f3; }
+.handoff-card.done { border-color:#bfe0cf; background:#f1f9f5; }
+.handoff-card > i { font-size:22px; color:#176b4d; }
+.handoff-card.failed > i { color:#b42318; }
+.handoff-text { display:grid; gap:3px; margin-right:auto; }
+.handoff-text strong { font-size:12px; }
+.handoff-text small { color:var(--muted); font-size:10px; line-height:1.5; }
+.handoff-card.failed .handoff-text small { color:#912018; }
+.reconcile-message { display:flex; align-items:center; gap:8px; margin:6px 0 14px; padding:10px 13px; border-radius:10px; background:#e7f3ed; color:#176b4d; font-size:11px; }
+.reconcile-section-title { display:flex; align-items:center; gap:8px; margin:18px 0 10px; font-size:13px; }
+.pending-list { display:grid; gap:10px; }
+.pending-row { display:flex; align-items:flex-start; justify-content:space-between; gap:16px; padding:13px 15px; border:1px solid #f0d9b0; border-radius:13px; background:#fffbf1; }
+.pending-info { display:grid; gap:3px; }
+.pending-info strong { font-size:12px; }
+.pending-info small { color:var(--muted); font-size:10px; }
+.pending-reason { display:flex; align-items:center; gap:6px; margin:4px 0 0; color:#8e4b02; font-size:10px; line-height:1.5; }
+.pending-actions { display:flex; align-items:flex-end; gap:8px; flex-wrap:wrap; }
+.pending-actions label { display:grid; gap:5px; color:#48554e; font-size:10px; font-weight:700; }
+.pending-actions select { min-height:34px; padding:0 8px; border:1px solid #cbd7d0; border-radius:8px; background:white; font-size:11px; }
+.matched-list { display:grid; gap:7px; }
+.matched-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; padding:9px 12px; border:1px solid var(--line); border-radius:11px; background:white; }
+.matched-row strong { font-size:11px; }
+.matched-row em { color:var(--muted); font-size:10px; font-style:normal; }
+.matched-chip { display:inline-flex; align-items:center; gap:4px; padding:3px 8px; border-radius:999px; background:var(--green-soft); color:#2f694f; font-size:10px; }
+.resolved-list { display:grid; gap:6px; }
+.resolved-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 12px; border:1px solid var(--line); border-radius:10px; background:#fafcfb; font-size:10px; }
+.resolved-row em { font-style:normal; }
+
+/* ── 拆出分案对话框 ─────────────────────────────── */
+.split-claim-list { display:grid; gap:7px; max-height:240px; overflow:auto; padding:4px; }
+.split-claim { display:flex; align-items:center; gap:10px; padding:9px 11px; border:1px solid var(--line); border-radius:11px; background:white; cursor:pointer; }
+.split-claim input { margin:0; }
+.split-claim strong,.split-claim small { display:block; }
+.split-claim strong { font-size:12px; }
+.split-claim small { margin-top:2px; color:var(--muted); font-size:10px; }
+.split-summary { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; }
+.split-summary > div { display:grid; gap:2px; padding:10px; border:1px solid var(--line); border-radius:11px; background:#f7faf8; text-align:center; }
+.split-summary strong { color:#176b4d; font-size:18px; }
+.split-summary span { color:var(--muted); font-size:9px; }

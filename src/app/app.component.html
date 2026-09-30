@@ -5,13 +5,39 @@
       <span class="brand-mark">权</span>
       <div><strong>权利要求映射工作台</strong><small>Claim-to-Spec Traceability</small></div>
     </div>
+    <div class="case-switch" *ngIf="!isDivisional; else divisionalSwitch">
+      <span class="case-chip parent"><i class="pi pi-briefcase"></i><span>{{ parentCaseName }}<small>当前案件</small></span></span>
+      <p-button label="拆出分案" icon="pi pi-plus" size="small" [outlined]="true" [disabled]="!canEditMainData" (onClick)="openSplitDialog()"></p-button>
+    </div>
+    <ng-template #divisionalSwitch>
+      <div class="case-switch">
+        <button type="button" class="case-chip parent" (click)="openParent()">
+          <i class="pi pi-briefcase"></i><span>{{ parentCaseName }}<small>母案 · 只读归档</small></span>
+        </button>
+        <i class="pi pi-angle-right case-arrow"></i>
+        <span class="case-chip divisional"><i class="pi pi-copy"></i><span>{{ activeDivisional?.name }}<small>当前编辑</small></span></span>
+      </div>
+    </ng-template>
     <div class="top-actions">
-      <span class="save-state">浏览器本地自动保存</span>
+      <span class="save-state">两案结果分开保存</span>
       <p-button label="撤销" icon="pi pi-undo" severity="secondary" [outlined]="true" [disabled]="!history.past" (onClick)="service.undo()" pTooltip="Ctrl / ⌘ + Z"></p-button>
       <p-button label="重做" icon="pi pi-redo" severity="secondary" [outlined]="true" [disabled]="!history.future" (onClick)="service.redo()" pTooltip="Ctrl / ⌘ + Shift + Z"></p-button>
       <p-button label="保存版本" icon="pi pi-save" (onClick)="versionDialog = true" pTooltip="Ctrl / ⌘ + S"></p-button>
     </div>
   </header>
+
+  <div class="divisional-banner" *ngIf="activeDivisional as divisional">
+    <i class="pi pi-copy"></i>
+    <div class="banner-text">
+      <strong>正在编辑分案 {{ divisional.name }}</strong>
+      <small>由{{ parentCaseName }}拆出 · 技术特征、父子层级、说明书依据与批注已随分案带入，母案保持原样不动</small>
+    </div>
+    <span class="status-chip" [class.ready]="divisional.handoffStatus === 'done'" [class.error-chip]="divisional.handoffStatus === 'failed'">
+      {{ divisional.handoffStatus === 'done' ? '衔接完成' : divisional.handoffStatus === 'failed' ? '衔接失败' : divisional.handoffStatus === 'running' ? '衔接中…' : '待衔接' }}
+    </span>
+    <p-button *ngIf="divisional.handoffStatus === 'failed'" label="重试衔接" icon="pi pi-replay" size="small" (onClick)="retryHandoff()"></p-button>
+    <p-button label="返回母案" icon="pi pi-arrow-left" size="small" [outlined]="true" (onClick)="openParent()"></p-button>
+  </div>
 
   <main id="workbench" class="workbench">
     <aside class="case-sidebar">
@@ -57,6 +83,7 @@
         <button [class.active]="state.activeTab === 'claim'" (click)="service.setTab('claim')"><i class="pi pi-file-edit"></i>权利要求录入</button>
         <button [class.active]="state.activeTab === 'compare'" (click)="service.setTab('compare')"><i class="pi pi-arrows-h"></i>版本比较</button>
         <button [class.active]="state.activeTab === 'audit'" (click)="service.setTab('audit')"><i class="pi pi-check-square"></i>核对清单</button>
+        <button *ngIf="isDivisional" [class.active]="state.activeTab === 'reconcile'" (click)="service.setTab('reconcile')"><i class="pi pi-copy"></i>分案对账<span *ngIf="pendingBasisItems.length" class="tab-badge">{{ pendingBasisItems.length }}</span></button>
       </nav>
 
       <div class="view" *ngIf="state.activeTab === 'mapping'">
@@ -201,6 +228,70 @@
           </div>
         </section>
       </div>
+
+      <div class="view" *ngIf="state.activeTab === 'reconcile'">
+        <section class="panel reconcile-panel" *ngIf="activeDivisional as divisional">
+          <div class="panel-heading"><span>分案与母案对账</span>
+            <p-button label="重新对账" icon="pi pi-refresh" size="small" [outlined]="true" (onClick)="reconcileNow()"></p-button>
+          </div>
+          <p class="hint">分案与母案按说明书正文对账：段落编号对不上的依据先退回待确认，不能让它指到分案里没有的特征或段落。两案结果分开保存，重开分案可继续核对。</p>
+
+          <div class="handoff-card" [class.failed]="divisional.handoffStatus === 'failed'" [class.done]="divisional.handoffStatus === 'done'">
+            <i class="pi" [class.pi-check-circle]="divisional.handoffStatus === 'done'" [class.pi-times-circle]="divisional.handoffStatus === 'failed'" [class.pi-spin]="divisional.handoffStatus === 'running'"></i>
+            <div class="handoff-text">
+              <strong>衔接状态：{{ divisional.handoffStatus === 'done' ? '已完成' : divisional.handoffStatus === 'failed' ? '失败' : divisional.handoffStatus === 'running' ? '衔接中' : '待衔接' }}（第 {{ divisional.handoffAttempts }} 次）</strong>
+              <small *ngIf="divisional.handoffError">{{ divisional.handoffError }}</small>
+              <small *ngIf="divisional.handoffStatus === 'done'">分案清单已从母案衔接：权利要求、技术特征、父子层级、说明书依据与批注均已带入，母案保持原样。</small>
+            </div>
+            <p-button *ngIf="divisional.handoffStatus === 'failed'" label="从分案侧重试衔接" icon="pi pi-replay" (onClick)="retryHandoff()"></p-button>
+          </div>
+
+          <p class="reconcile-message" *ngIf="reconcileMessage"><i class="pi pi-info-circle"></i>{{ reconcileMessage }}</p>
+
+          <h3 class="reconcile-section-title">待确认依据 <p-badge [value]="pendingBasisItems.length" [severity]="pendingBasisItems.length ? 'warn' : 'success'" /></h3>
+          <div class="pending-list" *ngIf="pendingBasisItems.length; else noPending">
+            <article class="pending-row" *ngFor="let item of pendingBasisItems">
+              <div class="pending-info">
+                <strong>{{ item.featureLabel }}</strong>
+                <small>原引用段落：{{ item.paragraphSection }}</small>
+                <p class="pending-reason"><i class="pi pi-exclamation-triangle"></i>{{ item.reason }}</p>
+              </div>
+              <div class="pending-actions">
+                <label>重新指向
+                  <select [(ngModel)]="repointTargets[item.id]">
+                    <option value="">选择分案说明书段落…</option>
+                    <option *ngFor="let paragraph of state.paragraphs" [value]="paragraph.id">{{ paragraph.section }} · {{ paragraph.text.slice(0, 16) }}</option>
+                  </select>
+                </label>
+                <p-button label="确认指向" size="small" [disabled]="!repointTargets[item.id]" (onClick)="resolvePending(item, 'repoint')"></p-button>
+                <p-button label="丢弃" size="small" severity="danger" [text]="true" (onClick)="resolvePending(item, 'discard')"></p-button>
+              </div>
+            </article>
+          </div>
+          <ng-template #noPending><div class="empty-success"><i class="pi pi-check-circle"></i><span>没有待确认依据，所有说明书依据均已匹配。</span></div></ng-template>
+
+          <h3 class="reconcile-section-title">已对账依据 <p-badge [value]="matchedBasisRows.length" severity="success" /></h3>
+          <div class="matched-list">
+            <article class="matched-row" *ngFor="let row of matchedBasisRows">
+              <strong>{{ row.featureLabel }}</strong>
+              <span class="matched-chip" *ngFor="let section of row.sections"><i class="pi pi-check"></i>{{ section }}</span>
+              <em *ngIf="!row.sections.length">无依据</em>
+            </article>
+          </div>
+
+          <ng-container *ngIf="resolvedBasisItems.length">
+            <h3 class="reconcile-section-title">已处理记录</h3>
+            <div class="resolved-list">
+              <div class="resolved-row" *ngFor="let item of resolvedBasisItems">
+                <span>{{ item.featureLabel }} · {{ item.paragraphSection }}</span>
+                <span class="status-chip" [class.ready]="item.status === 'resolved'">
+                  {{ item.status === 'resolved' ? '已重新指向' : '已丢弃' }}<em *ngIf="item.repointedTo"> → {{ paragraphLabel(item.repointedTo) }}</em>
+                </span>
+              </div>
+            </div>
+          </ng-container>
+        </section>
+      </div>
     </section>
 
     <aside class="inspector">
@@ -253,4 +344,38 @@
     <p>{{ issue.detail }}</p>
   </div>
   <ng-template pTemplate="footer"><p-button label="关闭" (onClick)="closeIssue()" /></ng-template>
+</p-dialog>
+
+<p-dialog header="拆出分案" [(visible)]="splitDialogVisible" [modal]="true" [style]="{ width: '580px' }">
+  <div class="dialog-body" *ngIf="!splitResult">
+    <p>挑选要保留在分案中的权利要求。工作台将把这些权利要求对应的技术特征、父子层级、说明书依据和批注一起带进分案，母案保持原样不动。</p>
+    <div class="split-claim-list">
+      <label class="split-claim" *ngFor="let claim of state.parentSlice.claims">
+        <input type="checkbox" [checked]="splitSelectedIds.has(claim.id)" (change)="toggleSplitClaim(claim.id, $any($event.target).checked)">
+        <span class="claim-number">{{ claim.number }}</span>
+        <span><strong>{{ claim.title }}</strong><small>{{ claim.independent ? '独立权利要求' : '从属权利要求' }}</small></span>
+      </label>
+    </div>
+    <div class="split-summary">
+      <div><strong>{{ splitSummary.claims }}</strong><span>权利要求</span></div>
+      <div><strong>{{ splitSummary.features }}</strong><span>技术特征（含父子/引用层级）</span></div>
+      <div><strong>{{ splitSummary.paragraphs }}</strong><span>说明书段落副本</span></div>
+      <div><strong>{{ splitSummary.annotations }}</strong><span>批注</span></div>
+    </div>
+    <p class="hint">同一分案清单再次提交不会重复建件；衔接失败后可从分案这一侧重试。</p>
+  </div>
+  <div class="dialog-body" *ngIf="splitResult?.kind === 'duplicate'">
+    <i class="pi pi-info-circle" style="font-size:24px;color:#176b4d"></i>
+    <p>该分案清单已建件（<strong>{{ divisionalName(splitResult!.existingId) }}</strong>）。同一份清单不重复建件，可直接打开已有分案继续核对。</p>
+  </div>
+  <ng-template pTemplate="footer">
+    <ng-container *ngIf="!splitResult">
+      <p-button label="取消" severity="secondary" [outlined]="true" (onClick)="splitDialogVisible = false"></p-button>
+      <p-button label="确认拆出" icon="pi pi-check" [disabled]="!splitSelectedIds.size" (onClick)="confirmSplit()"></p-button>
+    </ng-container>
+    <ng-container *ngIf="splitResult">
+      <p-button label="关闭" severity="secondary" [outlined]="true" (onClick)="splitDialogVisible = false"></p-button>
+      <p-button label="打开已有分案" icon="pi pi-arrow-right" (onClick)="openDivisional(splitResult!.existingId)"></p-button>
+    </ng-container>
+  </ng-template>
 </p-dialog>

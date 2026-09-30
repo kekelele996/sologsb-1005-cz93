@@ -1,9 +1,10 @@
 import { Injectable, OnDestroy } from '@angular/core'
 import { BehaviorSubject, map, type Observable } from 'rxjs'
-import type { Annotation, Claim, ClaimVersion, Feature, Paragraph, Position, Role, ValidationIssue, WorkbenchState } from './models'
+import type { Annotation, CaseSlice, Claim, DivisionalCase, Feature, Paragraph, PendingBasis, Position, Role, ValidationIssue, WorkbenchState } from './models'
 
 const STORAGE_KEY = 'patent-claim-mapping-workbench-v1'
 const POSITION_KEY = 'patent-claim-mapping-position-v1'
+const PARENT_CASE_ID = 'parent'
 
 const initialClaims: Claim[] = [
   { id: 'claim-1', number: 1, title: '一种自适应展柜环境控制装置', independent: true, text: '一种自适应展柜环境控制装置，包括：柜体；环境传感模块，设置于所述柜体内并用于采集温湿度数据；以及控制模块，与所述环境传感模块通信，并根据所述温湿度数据调节所述柜体的微环境。' },
@@ -30,21 +31,26 @@ const initialAnnotations: Annotation[] = [
   { id: 'annotation-2', featureId: 'feature-d', authorRole: 'author', authorName: '代理人 · 陈昊', text: '[0024] 已支持分级调节，发布前补充除湿单元与通信模块的连接关系。', updatedAt: '2026-09-24T04:05:00.000Z' }
 ]
 function demoState(): WorkbenchState {
-  return {
+  const slice: CaseSlice = {
     claims: initialClaims, paragraphs: initialParagraphs, features: initialFeatures,
     annotations: initialAnnotations, orphanMappings: [], versions: [],
-    role: 'author', currentUserRole: 'author', selectedClaimId: 'claim-1', selectedFeatureId: 'feature-b', activeTab: 'mapping'
+    selectedClaimId: 'claim-1', selectedFeatureId: 'feature-b', activeTab: 'mapping'
+  }
+  return {
+    ...slice,
+    role: 'author', currentUserRole: 'author',
+    activeCaseId: PARENT_CASE_ID, parentSlice: slice, divisionalCases: []
   }
 }
 function clone<T>(value: T): T { return structuredClone(value) }
+function delay(ms: number): Promise<void> { return new Promise(resolve => setTimeout(resolve, ms)) }
 
 @Injectable({ providedIn: 'root' })
 export class WorkbenchService implements OnDestroy {
   private readonly initialState = this.loadState()
   private readonly stateSubject = new BehaviorSubject<WorkbenchState>(this.initialState)
   private readonly historySubject = new BehaviorSubject<{ past: number; future: number }>({ past: 0, future: 0 })
-  private past: WorkbenchState[] = []
-  private future: WorkbenchState[] = []
+  private historyByCase: Record<string, { past: WorkbenchState[]; future: WorkbenchState[] }> = {}
 
   readonly state$ = this.stateSubject.asObservable()
   readonly history$ = this.historySubject.asObservable()
@@ -53,6 +59,9 @@ export class WorkbenchService implements OnDestroy {
   readonly features$ = this.state$.pipe(map(state => state.features))
   readonly annotations$ = this.state$.pipe(map(state => state.annotations))
   readonly role$ = this.state$.pipe(map(state => state.role))
+  readonly activeCaseId$ = this.state$.pipe(map(state => state.activeCaseId))
+  readonly divisionalCases$ = this.state$.pipe(map(state => state.divisionalCases))
+  readonly activeDivisional$ = this.state$.pipe(map(state => state.divisionalCases.find(item => item.id === state.activeCaseId) || null))
   readonly selectedClaim$ = this.state$.pipe(map(state => state.claims.find(claim => claim.id === state.selectedClaimId) || state.claims[0]))
   readonly selectedFeature$ = this.state$.pipe(map(state => state.features.find(feature => feature.id === state.selectedFeatureId) || null))
   readonly issues$ = this.state$.pipe(map(state => this.validate(state)))
@@ -66,8 +75,8 @@ export class WorkbenchService implements OnDestroy {
   }
 
   get snapshot(): WorkbenchState { return clone(this.stateSubject.value) }
-  get canUndo(): boolean { return this.past.length > 0 }
-  get canRedo(): boolean { return this.future.length > 0 }
+  get canUndo(): boolean { return this.historyFor(this.stateSubject.value.activeCaseId).past.length > 0 }
+  get canRedo(): boolean { return this.historyFor(this.stateSubject.value.activeCaseId).future.length > 0 }
 
   selectClaim(id: string): void {
     this.patchState(state => { state.selectedClaimId = id; state.selectedFeatureId = state.features.find(feature => feature.claimId === id)?.id || null })
@@ -118,15 +127,31 @@ export class WorkbenchService implements OnDestroy {
     this.commit(state => {
       const paragraph = state.paragraphs.find(item => item.id === id)
       if (paragraph) Object.assign(paragraph, patch)
+      if (state.activeCaseId !== PARENT_CASE_ID) this.reconcileDraft(state, state.activeCaseId)
     })
   }
 
   deleteParagraph(id: string): void {
     if (this.stateSubject.value.role === 'viewer') return
     this.commit(state => {
-      state.paragraphs = state.paragraphs.filter(item => item.id !== id)
-      state.features.forEach(feature => { feature.supportIds = feature.supportIds.filter(paragraphId => paragraphId !== id) })
-      state.orphanMappings = state.orphanMappings.filter(item => item.paragraphId !== id)
+      if (state.activeCaseId === PARENT_CASE_ID) {
+        state.paragraphs = state.paragraphs.filter(item => item.id !== id)
+        state.features.forEach(feature => { feature.supportIds = feature.supportIds.filter(paragraphId => paragraphId !== id) })
+        state.orphanMappings = state.orphanMappings.filter(item => item.paragraphId !== id)
+        return
+      }
+      const divisional = this.findDivisional(state, state.activeCaseId)
+      if (!divisional) return
+      divisional.slice.paragraphs = divisional.slice.paragraphs.filter(item => item.id !== id)
+      divisional.slice.features.forEach(feature => {
+        if (!feature.supportIds.includes(id)) return
+        feature.supportIds = feature.supportIds.filter(paragraphId => paragraphId !== id)
+        this.pushPending(divisional, {
+          featureId: feature.id, featureLabel: feature.label, paragraphId: id, paragraphSection: '已删除段落',
+          reason: '段落已从分案说明书移除，编号对不上；依据先退回待确认，不指向分案中不存在的段落。'
+        })
+      })
+      divisional.slice.orphanMappings = divisional.slice.orphanMappings.filter(item => item.paragraphId !== id)
     })
   }
 
@@ -231,18 +256,20 @@ export class WorkbenchService implements OnDestroy {
   }
 
   undo(): void {
-    const previous = this.past.pop()
+    const history = this.historyFor(this.stateSubject.value.activeCaseId)
+    const previous = history.past.pop()
     if (!previous) return
-    this.future.push(clone(this.stateSubject.value))
+    history.future.push(clone(this.stateSubject.value))
     this.stateSubject.next(previous)
     this.updateHistory()
     this.saveState()
   }
 
   redo(): void {
-    const next = this.future.pop()
+    const history = this.historyFor(this.stateSubject.value.activeCaseId)
+    const next = history.future.pop()
     if (!next) return
-    this.past.push(clone(this.stateSubject.value))
+    history.past.push(clone(this.stateSubject.value))
     this.stateSubject.next(next)
     this.updateHistory()
     this.saveState()
@@ -251,14 +278,18 @@ export class WorkbenchService implements OnDestroy {
   savePosition(): void {
     if (typeof localStorage === 'undefined') return
     const state = this.stateSubject.value
-    const position: Position = { tab: state.activeTab, claimId: state.selectedClaimId, featureId: state.selectedFeatureId, scrollY: window.scrollY }
+    const position: Position = { tab: state.activeTab, claimId: state.selectedClaimId, featureId: state.selectedFeatureId, scrollY: window.scrollY, caseId: state.activeCaseId }
     localStorage.setItem(POSITION_KEY, JSON.stringify(position))
     this.saveState()
   }
 
   readPosition(): Position {
-    if (typeof localStorage === 'undefined') return { tab: this.initialState.activeTab, claimId: this.initialState.selectedClaimId, featureId: this.initialState.selectedFeatureId, scrollY: 0 }
-    try { return { ...JSON.parse(localStorage.getItem(POSITION_KEY) || '{}'), ...this.stateSubject.value } } catch { return { tab: 'mapping', claimId: this.initialState.selectedClaimId, featureId: this.initialState.selectedFeatureId, scrollY: 0 } }
+    const fallback: Position = { tab: 'mapping', claimId: this.initialState.selectedClaimId, featureId: this.initialState.selectedFeatureId, scrollY: 0, caseId: PARENT_CASE_ID }
+    if (typeof localStorage === 'undefined') return fallback
+    try {
+      const parsed = JSON.parse(localStorage.getItem(POSITION_KEY) || '{}')
+      return { ...fallback, ...parsed }
+    } catch { return fallback }
   }
 
   exportJson(): string { return JSON.stringify({ ...this.snapshot, validationIssues: this.validate(this.stateSubject.value) }, null, 2) }
@@ -301,13 +332,222 @@ export class WorkbenchService implements OnDestroy {
     return visit(start.id)
   }
 
+  // ── 分案管理 ──────────────────────────────────────────────
+
+  get isDivisionalActive(): boolean { return this.stateSubject.value.activeCaseId !== PARENT_CASE_ID }
+
+  activateCase(caseId: string): void {
+    const state = this.stateSubject.value
+    if (caseId === state.activeCaseId) return
+    this.patchState(next => {
+      this.stashSlice(next)
+      next.activeCaseId = caseId
+      const slice = this.resolveSlice(next, caseId)
+      if (slice) {
+        next.claims = slice.claims
+        next.paragraphs = slice.paragraphs
+        next.features = slice.features
+        next.annotations = slice.annotations
+        next.orphanMappings = slice.orphanMappings
+        next.versions = slice.versions
+        next.selectedClaimId = slice.selectedClaimId
+        next.selectedFeatureId = slice.selectedFeatureId
+        next.activeTab = slice.activeTab
+      }
+    })
+    this.updateHistory()
+    this.savePosition()
+  }
+
+  createDivisional(claimIds: string[]): { ok: boolean; reason?: string; existingId?: string; divisionalId?: string } {
+    if (this.stateSubject.value.role === 'viewer') return { ok: false, reason: 'forbidden' }
+    const parent = this.stateSubject.value.parentSlice
+    const splitKey = claimIds.slice().sort((a, b) => {
+      const na = parent.claims.find(claim => claim.id === a)?.number ?? 0
+      const nb = parent.claims.find(claim => claim.id === b)?.number ?? 0
+      return na - nb
+    }).join('|')
+    const existing = this.stateSubject.value.divisionalCases.find(item => item.splitKey === splitKey)
+    if (existing) return { ok: false, reason: 'duplicate', existingId: existing.id }
+
+    const id = `divisional-${Date.now()}`
+    const selectedClaimIds = new Set(claimIds)
+    const featureIdSet = new Set(parent.features.filter(feature => selectedClaimIds.has(feature.claimId)).map(feature => feature.id))
+    let grew = true
+    while (grew) {
+      grew = false
+      for (const feature of parent.features) {
+        if (!featureIdSet.has(feature.id)) continue
+        for (const ref of [feature.parentId, ...feature.referenceIds].filter((value): value is string => !!value)) {
+          if (!featureIdSet.has(ref)) { featureIdSet.add(ref); grew = true }
+        }
+      }
+    }
+    const features = clone(parent.features.filter(feature => featureIdSet.has(feature.id)))
+    const claimIdsUsed = new Set(features.map(feature => feature.claimId))
+    const claims = clone(parent.claims.filter(claim => claimIdsUsed.has(claim.id)))
+    const paragraphs = clone(parent.paragraphs)
+    const annotations = clone(parent.annotations.filter(annotation => featureIdSet.has(annotation.featureId)))
+    const slice: CaseSlice = {
+      claims, paragraphs, features, annotations, orphanMappings: [], versions: [],
+      selectedClaimId: claims[0]?.id || '', selectedFeatureId: features[0]?.id || null, activeTab: 'mapping'
+    }
+    const index = this.stateSubject.value.divisionalCases.length + 1
+    const divisional: DivisionalCase = {
+      id, name: `分案 D${index}`, parentCaseId: PARENT_CASE_ID, splitKey, claimIds: claimIds.slice(),
+      createdAt: new Date().toISOString(), handoffStatus: 'idle', handoffAttempts: 0, pendingBasis: [], slice
+    }
+    this.commit(state => { state.divisionalCases.push(divisional) })
+    this.activateCase(id)
+    void this.runHandoff(id)
+    return { ok: true, divisionalId: id }
+  }
+
+  retryHandoff(divisionalId: string): void {
+    if (this.stateSubject.value.role === 'viewer') return
+    void this.runHandoff(divisionalId)
+  }
+
+  reconcileDivisional(): { pending: number } {
+    if (this.stateSubject.value.role === 'viewer') return { pending: 0 }
+    let pending = 0
+    this.commit(state => {
+      if (state.activeCaseId === PARENT_CASE_ID) return
+      pending = this.reconcileDraft(state, state.activeCaseId)
+    })
+    return { pending }
+  }
+
+  resolvePendingBasis(pendingId: string, action: 'repoint' | 'discard', paragraphId?: string): void {
+    if (this.stateSubject.value.role === 'viewer') return
+    this.commit(state => {
+      const divisional = this.findDivisional(state, state.activeCaseId)
+      if (!divisional) return
+      const item = divisional.pendingBasis.find(entry => entry.id === pendingId)
+      if (!item || item.status !== 'pending') return
+      if (action === 'discard') {
+        item.status = 'discarded'
+        item.resolution = 'discarded'
+        return
+      }
+      if (!paragraphId) return
+      const feature = divisional.slice.features.find(entry => entry.id === item.featureId)
+      if (!feature) return
+      if (!feature.supportIds.includes(paragraphId)) feature.supportIds.push(paragraphId)
+      item.status = 'resolved'
+      item.resolution = 'repointed'
+      item.repointedTo = paragraphId
+    })
+  }
+
+  private async runHandoff(divisionalId: string): Promise<void> {
+    await delay(350)
+    const divisional = this.stateSubject.value.divisionalCases.find(item => item.id === divisionalId)
+    if (!divisional) return
+    if (divisional.handoffAttempts === 0) {
+      this.commit(state => {
+        const target = this.findDivisional(state, divisionalId)
+        if (!target) return
+        target.handoffStatus = 'running'
+        target.handoffAttempts = 1
+      })
+      await delay(700)
+      this.commit(state => {
+        const target = this.findDivisional(state, divisionalId)
+        if (!target) return
+        target.handoffStatus = 'failed'
+        target.handoffError = '衔接中断：分案说明书库接收未完成。可从分案这一侧重试衔接，已带入的特征与批注不会丢失。'
+      })
+      return
+    }
+    this.commit(state => {
+      const target = this.findDivisional(state, divisionalId)
+      if (!target) return
+      target.handoffStatus = 'running'
+      target.handoffAttempts += 1
+    })
+    await delay(700)
+    this.commit(state => {
+      const target = this.findDivisional(state, divisionalId)
+      if (!target) return
+      target.handoffStatus = 'done'
+      target.handoffError = undefined
+      this.reconcileDraft(state, divisionalId)
+    })
+  }
+
+  private reconcileDraft(state: WorkbenchState, divisionalId: string): number {
+    const divisional = this.findDivisional(state, divisionalId)
+    if (!divisional) return 0
+    let newlyPending = 0
+    for (const feature of divisional.slice.features) {
+      const kept: string[] = []
+      for (const paragraphId of feature.supportIds) {
+        const divParagraph = divisional.slice.paragraphs.find(item => item.id === paragraphId)
+        const parentParagraph = state.parentSlice.paragraphs.find(item => item.id === paragraphId)
+        let reason = ''
+        if (!divParagraph) reason = '段落已从分案说明书移除，编号对不上。'
+        else if (parentParagraph && divParagraph.section !== parentParagraph.section) reason = '段落编号与母案对不上。'
+        else if (parentParagraph && divParagraph.text !== parentParagraph.text) reason = '说明书正文与母案不一致。'
+        if (reason) {
+          const exists = divisional.pendingBasis.some(item => item.featureId === feature.id && item.paragraphId === paragraphId && item.status === 'pending')
+          if (!exists) {
+            divisional.pendingBasis.push({
+              id: `pending-${Date.now()}-${feature.id}-${paragraphId}`,
+              featureId: feature.id, featureLabel: feature.label,
+              paragraphId, paragraphSection: parentParagraph?.section || '编号缺失',
+              reason, status: 'pending'
+            })
+            newlyPending += 1
+          }
+        } else kept.push(paragraphId)
+      }
+      feature.supportIds = kept
+    }
+    return newlyPending
+  }
+
+  private pushPending(divisional: DivisionalCase, entry: Omit<PendingBasis, 'id' | 'status'>): void {
+    const exists = divisional.pendingBasis.some(item => item.featureId === entry.featureId && item.paragraphId === entry.paragraphId && item.status === 'pending')
+    if (exists) return
+    divisional.pendingBasis.push({ ...entry, id: `pending-${Date.now()}-${entry.featureId}-${entry.paragraphId}`, status: 'pending' })
+  }
+
+  private findDivisional(state: WorkbenchState, divisionalId: string): DivisionalCase | undefined {
+    return state.divisionalCases.find(item => item.id === divisionalId)
+  }
+
+  private resolveSlice(state: WorkbenchState, caseId: string): CaseSlice | undefined {
+    if (caseId === PARENT_CASE_ID) return state.parentSlice
+    return this.findDivisional(state, caseId)?.slice
+  }
+
+  private stashSlice(state: WorkbenchState): void {
+    const slice: CaseSlice = {
+      claims: state.claims, paragraphs: state.paragraphs, features: state.features,
+      annotations: state.annotations, orphanMappings: state.orphanMappings, versions: state.versions,
+      selectedClaimId: state.selectedClaimId, selectedFeatureId: state.selectedFeatureId, activeTab: state.activeTab
+    }
+    if (state.activeCaseId === PARENT_CASE_ID) state.parentSlice = slice
+    else {
+      const divisional = this.findDivisional(state, state.activeCaseId)
+      if (divisional) divisional.slice = slice
+    }
+  }
+
+  private historyFor(caseId: string): { past: WorkbenchState[]; future: WorkbenchState[] } {
+    if (!this.historyByCase[caseId]) this.historyByCase[caseId] = { past: [], future: [] }
+    return this.historyByCase[caseId]
+  }
+
   private commit(recipe: (state: WorkbenchState) => void): void {
     const current = clone(this.stateSubject.value)
     const next = clone(current)
     recipe(next)
-    this.past.push(current)
-    if (this.past.length > 60) this.past.shift()
-    this.future = []
+    const history = this.historyFor(next.activeCaseId)
+    history.past.push(current)
+    if (history.past.length > 60) history.past.shift()
+    history.future = []
     this.stateSubject.next(next)
     this.updateHistory()
     this.saveState()
@@ -320,13 +560,34 @@ export class WorkbenchService implements OnDestroy {
     this.saveState()
   }
 
-  private updateHistory(): void { this.historySubject.next({ past: this.past.length, future: this.future.length }) }
+  private updateHistory(): void {
+    const history = this.historyFor(this.stateSubject.value.activeCaseId)
+    this.historySubject.next({ past: history.past.length, future: history.future.length })
+  }
   private saveState(): void { if (typeof localStorage !== 'undefined') localStorage.setItem(STORAGE_KEY, JSON.stringify(this.stateSubject.value)) }
   private loadState(): WorkbenchState {
     if (typeof localStorage === 'undefined') return demoState()
     try {
       const stored = localStorage.getItem(STORAGE_KEY)
-      return stored ? { ...demoState(), ...JSON.parse(stored) } : demoState()
+      if (!stored) return demoState()
+      const parsed = JSON.parse(stored)
+      const demo = demoState()
+      if (!parsed.parentSlice) {
+        parsed.parentSlice = {
+          claims: parsed.claims ?? demo.parentSlice.claims,
+          paragraphs: parsed.paragraphs ?? demo.parentSlice.paragraphs,
+          features: parsed.features ?? demo.parentSlice.features,
+          annotations: parsed.annotations ?? demo.parentSlice.annotations,
+          orphanMappings: parsed.orphanMappings ?? [],
+          versions: parsed.versions ?? [],
+          selectedClaimId: parsed.selectedClaimId ?? demo.parentSlice.selectedClaimId,
+          selectedFeatureId: parsed.selectedFeatureId ?? demo.parentSlice.selectedFeatureId,
+          activeTab: parsed.activeTab ?? 'mapping'
+        }
+        parsed.activeCaseId = PARENT_CASE_ID
+        parsed.divisionalCases = []
+      }
+      return { ...demo, ...parsed }
     } catch { return demoState() }
   }
 }

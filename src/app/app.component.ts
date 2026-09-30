@@ -10,7 +10,7 @@ import { BadgeModule } from 'primeng/badge'
 import { DialogModule } from 'primeng/dialog'
 import { TooltipModule } from 'primeng/tooltip'
 import { Subscription } from 'rxjs'
-import type { Annotation, Claim, Feature, Role, ValidationIssue, WorkbenchState } from './models'
+import type { Annotation, Claim, DivisionalCase, Feature, PendingBasis, Role, ValidationIssue, WorkbenchState } from './models'
 import { WorkbenchService } from './workbench.service'
 
 @Component({
@@ -30,6 +30,11 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
   versionDialog = false
   versionName = ''
   activeIssue: ValidationIssue | null = null
+  splitDialogVisible = false
+  splitSelectedIds = new Set<string>()
+  splitResult: { kind: 'duplicate'; existingId: string } | null = null
+  reconcileMessage = ''
+  repointTargets: Record<string, string> = {}
   roleOptions: Array<{ label: string; value: Role }> = [
     { label: '代理人（可编辑主数据与本人批注）', value: 'author' },
     { label: '审查员（可编辑本人批注）', value: 'examiner' },
@@ -70,6 +75,40 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
   get warningCount(): number { return this.issues.filter(item => item.severity === 'warning').length }
   get canEditMainData(): boolean { return this.state.role !== 'viewer' }
   get mappedFeatureCount(): number { return this.claimFeatures.filter(feature => feature.supportIds.length > 0).length }
+  get isDivisional(): boolean { return this.state.activeCaseId !== 'parent' }
+  get activeDivisional(): DivisionalCase | undefined { return this.state.divisionalCases.find(item => item.id === this.state.activeCaseId) }
+  get parentCaseName(): string { return '母案 CN-2026-0917' }
+  get pendingBasisItems(): PendingBasis[] { return this.activeDivisional?.pendingBasis.filter(item => item.status === 'pending') || [] }
+  get resolvedBasisItems(): PendingBasis[] { return this.activeDivisional?.pendingBasis.filter(item => item.status !== 'pending') || [] }
+  get matchedBasisRows(): Array<{ featureLabel: string; sections: string[] }> {
+    if (!this.activeDivisional) return []
+    return this.activeDivisional.slice.features.map(feature => ({
+      featureLabel: feature.label,
+      sections: feature.supportIds.map(id => this.paragraphLabel(id))
+    }))
+  }
+  get splitSummary(): { claims: number; features: number; paragraphs: number; annotations: number } {
+    const parent = this.state.parentSlice
+    const selected = new Set(this.splitSelectedIds)
+    const featureIdSet = new Set(parent.features.filter(feature => selected.has(feature.claimId)).map(feature => feature.id))
+    let grew = true
+    while (grew) {
+      grew = false
+      for (const feature of parent.features) {
+        if (!featureIdSet.has(feature.id)) continue
+        for (const ref of [feature.parentId, ...feature.referenceIds].filter((value): value is string => !!value)) {
+          if (!featureIdSet.has(ref)) { featureIdSet.add(ref); grew = true }
+        }
+      }
+    }
+    const claimIds = new Set(parent.features.filter(feature => featureIdSet.has(feature.id)).map(feature => feature.claimId))
+    return {
+      claims: claimIds.size,
+      features: featureIdSet.size,
+      paragraphs: parent.paragraphs.length,
+      annotations: parent.annotations.filter(annotation => featureIdSet.has(annotation.featureId)).length
+    }
+  }
 
   claimLabel(id: string): string { return this.state.claims.find(item => item.id === id)?.title || '未命名权利要求' }
   featureLabel(id: string): string { return this.state.features.find(item => item.id === id)?.label || id }
@@ -120,6 +159,59 @@ export class AppComponent implements OnInit, AfterViewInit, OnDestroy {
 
   restoreVersion(id: string): void {
     this.service.restoreVersion(id)
+  }
+
+  openSplitDialog(): void {
+    this.splitResult = null
+    this.reconcileMessage = ''
+    this.splitSelectedIds = new Set(this.state.parentSlice.claims.map(claim => claim.id))
+    this.splitDialogVisible = true
+  }
+
+  toggleSplitClaim(id: string, checked: boolean): void {
+    if (checked) this.splitSelectedIds.add(id)
+    else this.splitSelectedIds.delete(id)
+  }
+
+  confirmSplit(): void {
+    if (!this.splitSelectedIds.size) return
+    const result = this.service.createDivisional(Array.from(this.splitSelectedIds))
+    if (!result.ok && result.reason === 'duplicate') {
+      this.splitResult = { kind: 'duplicate', existingId: result.existingId! }
+      return
+    }
+    this.splitDialogVisible = false
+  }
+
+  openDivisional(id: string): void {
+    this.service.activateCase(id)
+    this.splitDialogVisible = false
+  }
+
+  openParent(): void {
+    this.service.activateCase('parent')
+  }
+
+  divisionalName(id: string): string {
+    return this.state.divisionalCases.find(item => item.id === id)?.name || '分案'
+  }
+
+  retryHandoff(): void {
+    if (!this.isDivisional) return
+    this.service.retryHandoff(this.state.activeCaseId)
+  }
+
+  reconcileNow(): void {
+    const result = this.service.reconcileDivisional()
+    this.reconcileMessage = result.pending
+      ? `对账完成：${result.pending} 项依据已退回待确认，等待重新指向或丢弃。`
+      : '对账完成：分案说明书依据与母案全部匹配。'
+  }
+
+  resolvePending(item: PendingBasis, action: 'repoint' | 'discard'): void {
+    const target = this.repointTargets[item.id]
+    this.service.resolvePendingBasis(item.id, action, action === 'repoint' ? target : undefined)
+    delete this.repointTargets[item.id]
   }
 
   getVersion(id: string) { return this.state.versions.find(item => item.id === id) }

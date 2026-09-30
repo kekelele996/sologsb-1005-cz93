@@ -54,6 +54,49 @@ export interface Position {
   claimId: string
   featureId: string | null
   scrollY: number
+  caseId: string
+}
+
+export type CaseKind = 'parent' | 'divisional'
+export type HandoffStatus = 'idle' | 'running' | 'done' | 'failed'
+export type PendingBasisStatus = 'pending' | 'resolved' | 'discarded'
+
+export interface CaseSlice {
+  claims: Claim[]
+  paragraphs: Paragraph[]
+  features: Feature[]
+  annotations: Annotation[]
+  orphanMappings: OrphanMapping[]
+  versions: ClaimVersion[]
+  selectedClaimId: string
+  selectedFeatureId: string | null
+  activeTab: string
+}
+
+export interface PendingBasis {
+  id: string
+  featureId: string
+  featureLabel: string
+  paragraphId: string
+  paragraphSection: string
+  reason: string
+  status: PendingBasisStatus
+  resolution?: 'repointed' | 'discarded'
+  repointedTo?: string
+}
+
+export interface DivisionalCase {
+  id: string
+  name: string
+  parentCaseId: string
+  splitKey: string
+  claimIds: string[]
+  createdAt: string
+  handoffStatus: HandoffStatus
+  handoffError?: string
+  handoffAttempts: number
+  pendingBasis: PendingBasis[]
+  slice: CaseSlice
 }
 
 export interface WorkbenchState {
@@ -68,6 +111,9 @@ export interface WorkbenchState {
   selectedFeatureId: string | null
   activeTab: string
   currentUserRole: Role
+  activeCaseId: string
+  parentSlice: CaseSlice
+  divisionalCases: DivisionalCase[]
 }
 
 export interface ValidationIssue {
